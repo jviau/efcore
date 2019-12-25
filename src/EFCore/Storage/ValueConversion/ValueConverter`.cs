@@ -16,6 +16,8 @@ namespace Microsoft.EntityFrameworkCore.Storage.ValueConversion
     {
         private Func<object, object> _convertToProvider;
         private Func<object, object> _convertFromProvider;
+        private Func<TModel, TProvider> _convertToProviderTyped;
+        private Func<TProvider, TModel> _convertFromProviderTyped;
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="ValueConverter{TModel,TProvider}" /> class.
@@ -67,6 +69,20 @@ namespace Microsoft.EntityFrameworkCore.Storage.ValueConversion
         public override Func<object, object> ConvertFromProvider
             => NonCapturingLazyInitializer.EnsureInitialized(
                 ref _convertFromProvider, this, c => SanitizeConverter(c.ConvertFromProviderExpression));
+
+        /// <summary>
+        ///     Gets the function to convert typed values when writing data to the store.
+        /// </summary>
+        public virtual Func<TModel, TProvider> ConvertToProviderTyped
+            => NonCapturingLazyInitializer.EnsureInitialized(
+                ref _convertToProviderTyped, this, c => c.ConvertToProviderExpression.Compile());
+
+        /// <summary>
+        ///     Gets the function to convert typed values when reading data from the store.
+        /// </summary>
+        public virtual Func<TProvider, TModel> ConvertFromProviderTyped
+            => NonCapturingLazyInitializer.EnsureInitialized(
+                ref _convertFromProviderTyped, this, c => c.ConvertFromProviderExpression.Compile());
 
         /// <summary>
         ///     Gets the expression to convert objects when writing data to the store,

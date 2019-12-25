@@ -7,9 +7,191 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using JetBrains.Annotations;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Microsoft.EntityFrameworkCore.Update;
 
 namespace Microsoft.EntityFrameworkCore.ChangeTracking.Internal
 {
+    public class CurrentValueComparerFactory
+    {
+        public virtual IComparer<IUpdateEntry> Create([NotNull] IPropertyBase propertyBase)
+        {
+            var comparerType = propertyBase.ClrType;
+            var nonNullableType = comparerType.UnwrapNullableType();
+            if (IsGenericComparable())
+            {
+                return (IComparer<IUpdateEntry>)Activator.CreateInstance(
+                    typeof(CurrentValueComparer<>).MakeGenericType(comparerType),
+                    propertyBase);
+            }
+
+            if (typeof(IStructuralComparable).IsAssignableFrom(comparerType))
+            {
+                return new StructuralCurrentValueComparer(propertyBase);
+            }
+
+            if (typeof(IComparable).IsAssignableFrom(comparerType))
+            {
+                return new CurrentValueComparer(propertyBase);
+            }
+
+            if (propertyBase is IProperty property)
+            {
+                var converter = property.GetValueConverter()
+                    ?? property.GetTypeMapping().Converter;
+
+                if (converter != null)
+                {
+                    comparerType = converter.ProviderClrType;
+                    nonNullableType = comparerType.UnwrapNullableType();
+                    if (IsGenericComparable())
+                    {
+                        return (IComparer<IUpdateEntry>)Activator.CreateInstance(
+                            typeof(ConvertedCurrentValueComparer<,>).MakeGenericType(
+                                converter.ModelClrType, comparerType),
+                            propertyBase,
+                            converter);
+                    }
+
+                    if (typeof(IStructuralComparable).IsAssignableFrom(comparerType))
+                    {
+                        return new ConvertedStructuralCurrentValueComparer(propertyBase, converter);
+                    }
+
+                    if (typeof(IComparable).IsAssignableFrom(comparerType))
+                    {
+                        return new ConvertedCurrentValueComparer(propertyBase, converter);
+                    }
+                }
+            }
+
+            throw new InvalidOperationException($"Type not comparable: {propertyBase.ClrType}");
+
+            bool IsGenericComparable()
+                => typeof(IComparable<>).MakeGenericType(comparerType).IsAssignableFrom(comparerType)
+                    || typeof(IComparable<>).MakeGenericType(nonNullableType).IsAssignableFrom(nonNullableType)
+                    || comparerType.IsEnum;
+        }
+    }
+
+    public class CurrentValueComparer<TProperty> : IComparer<IUpdateEntry>
+    {
+        private readonly IPropertyBase _property;
+        private readonly IComparer<TProperty> _underlyingComparer;
+
+        public CurrentValueComparer([NotNull] IPropertyBase property)
+        {
+            _property = property;
+            _underlyingComparer = Comparer<TProperty>.Default;
+        }
+
+        public int Compare(IUpdateEntry x, IUpdateEntry y)
+            => _underlyingComparer.Compare(
+            x.GetCurrentValue<TProperty>(_property),
+            y.GetCurrentValue<TProperty>(_property));
+    }
+
+    public class ConvertedCurrentValueComparer<TProperty, TProvider> : IComparer<IUpdateEntry>
+    {
+        private readonly IPropertyBase _property;
+        private readonly IComparer<TProvider> _underlyingComparer;
+        private readonly ValueConverter<TProperty, TProvider> _converter;
+
+        public ConvertedCurrentValueComparer(
+            [NotNull] IPropertyBase property,
+            [NotNull] ValueConverter<TProperty, TProvider> converter)
+        {
+            _property = property;
+            _converter = converter;
+            _underlyingComparer = Comparer<TProvider>.Default;
+        }
+
+        public int Compare(IUpdateEntry x, IUpdateEntry y)
+            => _underlyingComparer.Compare(
+                _converter.ConvertToProviderTyped(x.GetCurrentValue<TProperty>(_property)),
+                _converter.ConvertToProviderTyped(y.GetCurrentValue<TProperty>(_property)));
+    }
+
+    public class CurrentValueComparer : IComparer<IUpdateEntry>
+    {
+        private readonly IPropertyBase _property;
+        private readonly IComparer _underlyingComparer;
+
+        public CurrentValueComparer([NotNull] IPropertyBase property)
+            : this(property, Comparer.Default)
+        {
+        }
+
+        protected CurrentValueComparer([NotNull] IPropertyBase property, [NotNull] IComparer underlyingComparer)
+        {
+            _property = property;
+            _underlyingComparer = underlyingComparer;
+        }
+
+        public virtual object GetCurrentValue(IUpdateEntry entry)
+            => entry.GetCurrentValue(_property);
+
+        public virtual int Compare(IUpdateEntry x, IUpdateEntry y)
+            => Compare(x.GetCurrentValue(_property), y.GetCurrentValue(_property));
+
+        protected virtual int Compare([CanBeNull] object x, [CanBeNull] object y)
+            => _underlyingComparer.Compare(x, y);
+    }
+
+    public class ConvertedCurrentValueComparer : CurrentValueComparer
+    {
+        private readonly ValueConverter _converter;
+
+        public ConvertedCurrentValueComparer(
+            [NotNull] IPropertyBase property,
+            [NotNull] ValueConverter converter)
+            : base(property)
+        {
+            _converter = converter;
+        }
+
+        public override object GetCurrentValue(IUpdateEntry entry)
+            => _converter.ConvertToProvider(base.GetCurrentValue(entry));
+    }
+
+    public class StructuralCurrentValueComparer : CurrentValueComparer
+    {
+        public StructuralCurrentValueComparer([NotNull] IPropertyBase property)
+        : base(property, StructuralComparisons.StructuralComparer)
+        {
+        }
+
+        public override int Compare(IUpdateEntry x, IUpdateEntry y)
+        {
+            var xValue = GetCurrentValue(x);
+            var yValue = GetCurrentValue(y);
+
+            return xValue is Array xArray
+                && yValue is Array yArray
+                && xArray.Length != yArray.Length
+                    ? xArray.Length - yArray.Length
+                    : base.Compare(xValue, yValue);
+        }
+    }
+
+    public class ConvertedStructuralCurrentValueComparer : StructuralCurrentValueComparer
+    {
+        private readonly ValueConverter _converter;
+
+        public ConvertedStructuralCurrentValueComparer(
+            [NotNull] IPropertyBase property,
+            [NotNull] ValueConverter converter)
+            : base(property)
+        {
+            _converter = converter;
+        }
+
+        public override object GetCurrentValue(IUpdateEntry entry)
+            => _converter.ConvertToProvider(base.GetCurrentValue(entry));
+    }
+
+
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
     ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
