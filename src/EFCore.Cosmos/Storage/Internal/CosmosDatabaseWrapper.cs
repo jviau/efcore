@@ -100,17 +100,9 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
                 }
 
                 entriesSaved.Add(entry);
-
-                try
+                if (Save(entry))
                 {
-                    if (Save(entry))
-                    {
-                        rowsAffected++;
-                    }
-                }
-                catch (CosmosException ex)
-                {
-                    throw ThrowUpdateException(ex, entry);
+                    rowsAffected++;
                 }
             }
 
@@ -161,16 +153,9 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
                 }
 
                 entriesSaved.Add(entry);
-                try
+                if (await SaveAsync(entry, cancellationToken))
                 {
-                    if (await SaveAsync(entry, cancellationToken))
-                    {
-                        rowsAffected++;
-                    }
-                }
-                catch (CosmosException ex)
-                {
-                    throw ThrowUpdateException(ex, entry);
+                    rowsAffected++;
                 }
             }
 
@@ -348,25 +333,6 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
             }
 
             return principal.EntityType.IsDocumentRoot() ? principal : GetRootDocument(principal);
-        }
-
-        private Exception ThrowUpdateException(CosmosException exception, IUpdateEntry entry)
-        {
-            var documentSource = GetDocumentSource(entry.EntityType);
-            var id = documentSource.GetId(entry.SharedIdentityEntry ?? entry);
-            throw exception.StatusCode switch
-            {
-                HttpStatusCode.PreconditionFailed => new DbUpdateConcurrencyException(CosmosStrings.UpdateConflict(id), exception, new[] { entry }),
-                HttpStatusCode.Conflict => new DbUpdateException(CosmosStrings.UpdateConflict(id), exception, new[] { entry }),
-                _ => Rethrow(exception),
-            };
-        }
-
-        private static Exception Rethrow(Exception ex)
-        {
-            // Re-throw an exception, preserving the original stack and details, without being in the original "catch" block.
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw();
-            return ex;
         }
     }
 }

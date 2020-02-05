@@ -14,8 +14,10 @@ using JetBrains.Annotations;
 using Microsoft.Azure.Cosmos;
 using Microsoft.EntityFrameworkCore.Cosmos.Diagnostics.Internal;
 using Microsoft.EntityFrameworkCore.Cosmos.Infrastructure.Internal;
+using Microsoft.EntityFrameworkCore.Cosmos.Internal;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata.Conventions;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Update;
 using Microsoft.EntityFrameworkCore.Utilities;
@@ -291,10 +293,11 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
             var itemRequestOptions = CreateItemRequestOptions(entry);
             var partitionKey = CreatePartitionKey(entry);
 
-            using var response = await container.CreateItemStreamAsync(stream, partitionKey, itemRequestOptions, cancellationToken);
-            ProcessResponse(response, entry);
+            var statusCode = await ExecuteRequestAsync(
+                () => container.CreateItemStreamAsync(stream, partitionKey, itemRequestOptions, cancellationToken),
+                entry);
 
-            return response.StatusCode == HttpStatusCode.Created;
+            return statusCode == HttpStatusCode.Created;
         }
 
         /// <summary>
@@ -352,11 +355,12 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
             var itemRequestOptions = CreateItemRequestOptions(entry);
             var partitionKey = CreatePartitionKey(entry);
 
-            using var response = await container.ReplaceItemStreamAsync(
-                stream, parameters.ItemId, partitionKey, itemRequestOptions, cancellationToken);
-            ProcessResponse(response, entry);
+            var statusCode = await ExecuteRequestAsync(
+                () => container.ReplaceItemStreamAsync(
+                    stream, parameters.ItemId, partitionKey, itemRequestOptions, cancellationToken),
+                entry);
 
-            return response.StatusCode == HttpStatusCode.OK;
+            return statusCode == HttpStatusCode.OK;
         }
 
         /// <summary>
@@ -413,11 +417,42 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
             var itemRequestOptions = CreateItemRequestOptions(entry);
             var partitionKey = CreatePartitionKey(entry);
 
-            using var response = await items.DeleteItemStreamAsync(
-                parameters.DocumentId, partitionKey, itemRequestOptions, cancellationToken: cancellationToken);
-            ProcessResponse(response, entry);
+            var statusCode = await ExecuteRequestAsync(
+                () => items.DeleteItemStreamAsync(
+                    parameters.DocumentId, partitionKey, itemRequestOptions, cancellationToken: cancellationToken),
+                entry);
 
-            return response.StatusCode == HttpStatusCode.NoContent;
+            return statusCode == HttpStatusCode.NoContent;
+        }
+
+        private static async Task<HttpStatusCode> ExecuteRequestAsync(Func<Task<ResponseMessage>> request, IUpdateEntry entry)
+        {
+            try
+            {
+                using var response = await request();
+                ProcessResponse(response, entry);
+                return response.StatusCode;
+            }
+            catch (CosmosException exception)
+            {
+                if (exception.StatusCode == HttpStatusCode.Conflict)
+                {
+                    throw new DbUpdateException(CosmosStrings.UpdateConflict(GetId(entry)), exception, new[] { entry });
+                }
+
+                if (exception.StatusCode == HttpStatusCode.PreconditionFailed)
+                {
+                    new DbUpdateConcurrencyException(CosmosStrings.UpdateConflict(GetId(entry)), exception, new[] { entry });
+                }
+
+                throw;
+            }
+        }
+
+        private static string GetId(IUpdateEntry entry)
+        {
+            var idProperty = entry.EntityType.FindProperty(StoreKeyConvention.IdPropertyName);
+            return entry.GetCurrentValue<string>(idProperty);
         }
 
         private static ItemRequestOptions CreateItemRequestOptions(IUpdateEntry entry)
